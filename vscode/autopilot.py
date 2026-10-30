@@ -110,13 +110,25 @@ def ajuda(silencioso=False):
             return None
         print(f"🔴 {tipo.__name__}: {valor}")
         texto = str(valor)
-        if "API key" in texto or "API_KEY" in texto or "PERMISSION_DENIED" in texto:
-            print("💡 A chave não foi aceita. Crie de novo no AI Studio e cole no cofre 🔑.")
-        elif "429" in texto or "RESOURCE_EXHAUSTED" in texto:
-            print("💡 Limite de perguntas da sua chave. Espere um minuto e tente de novo.")
+        if tipo.__name__ == "SecretNotFoundError" and len(texto) > 60 and "_API_KEY" not in texto:
+            print("💡 Parece que você colou a CHAVE no lugar do NOME. Na célula vai só o nome (ex.: \"GROQ_API_KEY\").")
+            print("   A chave fica no cofre 🔑, no campo Value. E troque essa chave por uma nova no site do fornecedor.")
+        elif tipo.__name__ == "SecretNotFoundError":
+            print("💡 O cofre não tem um segredo com esse nome. Abra a chave 🔑 e confira o Name, com _ (sublinhado), e o Notebook access.")
+        elif "401" in texto or "invalid_api_key" in texto.lower() or "API key not valid" in texto or "PERMISSION_DENIED" in texto:
+            print("💡 A chave não foi aceita. Crie uma nova no site do fornecedor e cole no cofre 🔑 (campo Value).")
+        elif "503" in texto or "UNAVAILABLE" in texto or "high demand" in texto or "overloaded" in texto.lower():
+            print("💡 Esse fornecedor de IA está sobrecarregado agora (não é erro seu). Use o tutor() — ele tenta o próximo plano.")
+        elif "timed out" in texto.lower() or "timeout" in texto.lower():
+            print("💡 A IA demorou demais para responder. Use o tutor() — ele tenta o próximo plano.")
+        elif "429" in texto or "RESOURCE_EXHAUSTED" in texto or "rate limit" in texto.lower():
+            print("💡 Limite de perguntas por minuto. Espere 1 minuto, ou use o tutor() para tentar outro plano.")
         elif "404" in texto and "model" in texto.lower():
-            print("💡 Esse MODELO não existe mais. Peça ao professor o nome novo e troque na variável MODELO.")
-        elif tipo.__name__ == "NameError" and any(f"'{n}'" in texto for n in ("cliente", "tutor", "genai", "userdata", "chave", "REGRAS")):
+            print("💡 Esse MODELO não existe mais. Peça ao professor o nome novo e troque na variável do modelo.")
+        elif tipo.__name__ == "NameError" and "PLANOS" in celula and "'tutor_" in texto:
+            print("💡 Na lista PLANOS, deixe só os planos que você montou (ex.: [tutor_colab, tutor_groq]).")
+        elif tipo.__name__ == "NameError" and any(f"'{n}'" in texto for n in ("cliente", "tutor", "genai", "userdata", "chave", "REGRAS",
+                                                                               "tutor_colab", "tutor_groq", "tutor_gemini", "OpenAI", "ai")):
             print("💡 O tutor ainda não está montado. Volte na Parte 1 e complete os Passos 1 a 5, na ordem.")
         elif tipo.__name__ == "NameError" and any(f"'{n}'" in texto for n in ("obras", "lanc", "modelo", "painel")):
             print("💡 Falta rodar uma célula de cima (ler, limpar ou modelar). Rode as células anteriores, na ordem.")
@@ -138,18 +150,61 @@ def mostrar_chave(chave):
     return
 
 
+_RECEITAS = {
+    "tutor_colab": (("generate_text", "REGRAS"), "Plano A (Colab AI)"),
+    "tutor_groq": (("chat", "completions", "REGRAS", "content", "MODELO_GROQ"), "Plano B (Groq)"),
+    "tutor_gemini": (("generate_content", "REGRAS", "text", "MODELO_GEMINI"), "Plano C (Gemini)"),
+    "tutor": (("PLANOS",), "O tutor que nunca para"),
+}
+
+
 def checar_tutor(funcao):
-    """Confere a receita do tutor antes de usar (sem gastar pergunta da IA)."""
-    nomes = funcao.__code__.co_names
-    if any("___" in n for n in nomes) or any("___" in str(c) for c in funcao.__code__.co_consts):
+    """Confere uma receita de tutor antes de usar (sem gastar pergunta da IA)."""
+    codigo = funcao.__code__
+    nomes = set(codigo.co_names) | set(codigo.co_varnames)
+    for interno in codigo.co_consts:          # funções dentro da função
+        if hasattr(interno, "co_names"):
+            nomes |= set(interno.co_names)
+    if any("___" in n for n in nomes) or any("___" in str(c) for c in codigo.co_consts):
         print(LACUNA); return
-    faltando = [n for n, explicacao in (("REGRAS", "as regras no system_instruction"),
-                                        ("text", "o .text no print"), ("MODELO", "o MODELO"))
-                if n not in nomes]
+    precisa, nome_bonito = _RECEITAS.get(funcao.__name__, ((), "Receita"))
+    faltando = [n for n in precisa if n not in nomes]
     if faltando:
-        print(f"❌ A receita ainda não usa: {faltando}"); return
-    print("✅ Receita do tutor pronta. Agora é só usar: tutor(\"sua pergunta\")")
-    return
+        print(f"❌ A receita {funcao.__name__} ainda não usa: {faltando}"); return
+    print(f"✅ {nome_bonito} pronto. Teste com: {funcao.__name__}(\"sua pergunta\")")
+
+
+def com_limite(plano, pergunta, segundos=30):
+    """Roda um plano de IA com tempo máximo. Demorou demais? Dá erro, e o tutor() tenta o próximo."""
+    import concurrent.futures
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    tarefa = executor.submit(plano, pergunta)
+    try:
+        return tarefa.result(timeout=segundos)
+    except concurrent.futures.TimeoutError:
+        raise TimeoutError(f"demorou mais de {segundos} segundos") from None
+    finally:
+        executor.shutdown(wait=False)
+
+
+def motivo(erro):
+    """Explica em poucas palavras por que um plano de IA falhou."""
+    texto, tipo = str(erro), type(erro).__name__
+    if "___" in texto:
+        return "ainda tem lacuna ______"
+    if tipo == "TimeoutError" or "timed out" in texto.lower():
+        return "demorou demais"
+    if "503" in texto or "UNAVAILABLE" in texto or "overloaded" in texto.lower() or "high demand" in texto:
+        return "está lotado agora"
+    if "429" in texto or "RESOURCE_EXHAUSTED" in texto or "rate limit" in texto.lower():
+        return "limite de perguntas por minuto"
+    if "401" in texto or "invalid_api_key" in texto.lower() or "API key not valid" in texto:
+        return "a chave foi recusada"
+    if tipo == "SecretNotFoundError":
+        return "a chave não está no cofre"
+    if tipo == "NameError":
+        return "esse plano ainda não foi montado"
+    return f"{tipo}: {texto[:80]}"
 
 
 def checar_regras(regras):

@@ -15,7 +15,15 @@ O aluno monta um tutor de IA (Gemini), escreve as peças de um motor de limpeza 
 3. No fim, o Colab baixa o **Obras.zip**. Extraia em qualquer pasta, abra `projeto\Obras.pbip`
    no Power BI Desktop e clique em **Atualizar** (os dados já vão dentro do projeto).
 
-O tutor usa uma chave gratuita do Gemini (aistudio.google.com), guardada nos **Segredos 🔑** do Colab.
+O tutor tem **3 opções de IA**, e se uma lotar ou demorar, ele usa a próxima:
+
+| Plano | Chave | Destaque |
+|---|---|---|
+| A · Colab AI | não precisa | já vem no Colab |
+| B · Groq | grátis em console.groq.com (`GROQ_API_KEY`) | muito rápido, não treina com seus dados |
+| C · Gemini | grátis em aistudio.google.com (`GEMINI_API_KEY`) | opcional — pode lotar (503) e usar as perguntas no plano grátis |
+
+As chaves ficam nos **Segredos 🔑** do Colab, nunca no código.
 
 ## 💻 Versão VS Code (como na empresa)
 
