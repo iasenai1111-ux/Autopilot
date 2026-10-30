@@ -42,6 +42,7 @@ lanc = lanc[lanc["Data"] != "TOTAL GERAL"]
 # ---------- 4. DINHEIRO: TEXTO -> NÚMERO ----------
 def para_numero(valor):
     """'R$ 1.234,56' vira 1234.56. Se já for número, devolve igual."""
+    valor = ap.validar_numero_br(valor)
     if isinstance(valor, str):
         valor = valor.replace("R$", "").replace(".", "").replace(",", ".").strip()
     return float(valor)
@@ -80,8 +81,16 @@ total_python = lanc["Previsto"].sum()
 total_sistema = para_numero(total_do_sistema["Previsto"].iloc[0])
 print(f"Total previsto — Python: {total_python:,.2f} | Sistema: {total_sistema:,.2f}")
 print("Bateu! ✅" if round(total_python, 2) == round(total_sistema, 2) else "NÃO bateu ❌ — sobrou sujeira")
+if round(total_python, 2) != round(total_sistema, 2):
+    raise ValueError("Conferência falhou: a base não será salva.")
 print("Categorias:", sorted(lanc["Categoria"].dropna().unique()))
 print("Categorias que não foram reconhecidas:", lanc["Categoria"].isna().sum())
+if lanc["Categoria"].isna().any():
+    raise ValueError("Há categorias desconhecidas. Corrija o mapeamento antes de salvar.")
+total_realizado_sistema = para_numero(total_do_sistema["Realizado"].iloc[0])
+if round(lanc["Realizado"].sum(), 2) != round(total_realizado_sistema, 2):
+    raise ValueError("O total realizado diverge do sistema. A base não será salva.")
+print("Total realizado também conferido ✅")
 
 # ---------- 9. SALVAR ----------
 calendario = ap.calendario(lanc["Data"])

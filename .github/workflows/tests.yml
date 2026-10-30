@@ -1,0 +1,18 @@
+name: Validar motor
+on: [push, pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r vscode/requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - name: Executar fluxo VS Code
+        working-directory: vscode
+        run: |
+          python 1_tratar.py
+          python 2_modelar.py
+          python 3_painel.py

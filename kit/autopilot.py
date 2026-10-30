@@ -21,6 +21,8 @@ import re
 import shutil
 import uuid
 import zlib
+import tempfile
+from numbers import Real
 from pathlib import Path
 
 import pandas as pd
@@ -69,6 +71,73 @@ def salvar_base(tabelas, arquivo=BASE_TRATADA):
 # AS PEÇAS DO MOTOR — o aluno escreve, o Python confere
 # =====================================================================
 
+VERSAO = "2026.10.30.1"
+
+REGRAS_TUTOR = """Você é o tutor de Python, pandas e Power BI dos alunos iniciantes do SENAI.
+Responda em português do Brasil, em no máximo 3 passos curtos.
+Use Python 3 nos exercícios de Python e DAX apenas para medidas do Power BI.
+NUNCA entregue a função completa nem preencha todas as lacunas de um exercício.
+Dê uma pista e um pequeno exemplo relacionado, na mesma linguagem, com outro valor.
+Não use JavaScript, parseFloat ou Number para resolver exercícios deste notebook.
+Para dinheiro brasileiro, ponto separa milhar e vírgula separa decimal.
+Se faltar informação, peça a tentativa do aluno ou a mensagem de erro.
+Não invente tabelas, colunas, resultados de testes ou garantias de acerto."""
+
+CONTEXTO_TUTOR = """Curso: análise de dados de uma construtora fictícia.
+Ambiente: Google Colab, Python 3 e pandas. O aluno completa lacunas.
+Peças: para_numero, data_br, padronizar e conferir_total.
+para_numero: aceita números finitos ou texto monetário brasileiro como R$ 1.234,56.
+Texto decimal estrangeiro e entradas vazias devem ser rejeitados, não adivinhados.
+data_br: datas dia/mês/ano. padronizar: espaços nas pontas e maiúsculas.
+conferir_total: compara somas arredondadas a duas casas.
+O modelo não vê automaticamente imagens, células anteriores ou variáveis do Colab.
+Para DAX, use apenas o resumo de tabelas e medidas anexado à pergunta."""
+
+
+def preparar_pergunta(pergunta, contexto=CONTEXTO_TUTOR):
+    _sem_lacuna(pergunta)
+    if not isinstance(pergunta, str) or not pergunta.strip():
+        raise ValueError("Escreva uma pergunta antes de chamar o tutor.")
+    return f"Contexto da aula:\n{contexto}\n\nPergunta do aluno:\n{pergunta}"
+
+
+def validar_resposta(resposta):
+    if not isinstance(resposta, str) or not resposta.strip():
+        raise ValueError("O provedor retornou uma resposta vazia.")
+    if re.search(r"```\s*(javascript|js|typescript)\b|\b(parseFloat|Number)\s*\(", resposta, re.I):
+        raise ValueError("A resposta usou uma linguagem incompatível com a aula.")
+    return resposta.strip()
+
+
+def validar_numero_br(valor):
+    """Valida o contrato brasileiro; devolve texto sem símbolo/espaços ou número finito."""
+    if isinstance(valor, Real) and not isinstance(valor, bool):
+        if not math.isfinite(float(valor)):
+            raise ValueError("O valor precisa ser um número finito.")
+        return valor
+    if not isinstance(valor, str):
+        raise ValueError("Use um número ou texto monetário brasileiro; valor ausente não é zero.")
+    texto = valor.strip().replace("\u00a0", " ")
+    achou = re.fullmatch(r"([+-]?)\s*(?:R\$\s*)?([+-]?)(\d{1,3}(?:\.\d{3})+|\d+)(,\d{1,2})?", texto)
+    if not achou or (achou.group(1) and achou.group(2)):
+        raise ValueError("Formato inválido. Use, por exemplo, R$ 1.234,56; ponto é milhar.")
+    return (achou.group(1) or achou.group(2)) + achou.group(3) + (achou.group(4) or "")
+
+
+def numero_br(valor):
+    valor = validar_numero_br(valor)
+    return float(valor.replace(".", "").replace(",", ".")) if isinstance(valor, str) else float(valor)
+
+
+def erro_seguro(erro):
+    """Não inclui conteúdo potencialmente sensível de exceções de serviços externos."""
+    texto = str(erro)
+    if type(erro).__name__ in ("SecretNotFoundError", "NotebookAccessError"):
+        return "Confira o nome do segredo e o acesso ao notebook no cofre."
+    texto = re.sub(r"(?:gsk_|sk-|ghp_|github_pat_|AIza|AQ\.)[A-Za-z0-9_.-]{8,}", "[CHAVE OCULTA]", texto)
+    return texto
+
+
 PECAS = {}          # peças aprovadas no teste
 LACUNA = "🟡 Ainda tem lacuna ______ nesta célula. Troque cada ______ pelo que a explicação pede e rode de novo."
 
@@ -108,7 +177,7 @@ def ajuda(silencioso=False):
         if isinstance(valor, Lacuna) or "___" in str(valor) or "___" in celula:
             print(LACUNA)
             return None
-        print(f"🔴 {tipo.__name__}: {valor}")
+        print(f"🔴 {tipo.__name__}: {erro_seguro(valor)}")
         texto = str(valor)
         if tipo.__name__ == "SecretNotFoundError" and len(texto) > 60 and "_API_KEY" not in texto:
             print("💡 Parece que você colou a CHAVE no lugar do NOME. Na célula vai só o nome (ex.: \"GROQ_API_KEY\").")
@@ -146,7 +215,7 @@ def mostrar_chave(chave):
     _sem_lacuna(chave)
     if not chave or len(str(chave)) < 20:
         print("❌ A chave veio vazia ou curta demais. Confira o Value no cofre 🔑."); return
-    print(f"✅ Chave encontrada: {chave[:4]}{'•' * 12}{chave[-3:]}  (nunca mostre a chave inteira)")
+    print("✅ Chave encontrada no cofre (valor oculto).")
     return
 
 
@@ -154,7 +223,7 @@ _RECEITAS = {
     "tutor_colab": (("generate_text", "REGRAS"), "Plano A (Colab AI)"),
     "tutor_groq": (("chat", "completions", "REGRAS", "content", "MODELO_GROQ"), "Plano B (Groq)"),
     "tutor_gemini": (("generate_content", "REGRAS", "text", "MODELO_GEMINI"), "Plano C (Gemini)"),
-    "tutor": (("PLANOS",), "O tutor que nunca para"),
+    "tutor": (("PLANOS",), "O tutor com alternativas"),
 }
 
 
@@ -184,7 +253,8 @@ def com_limite(plano, pergunta, segundos=30):
     except concurrent.futures.TimeoutError:
         raise TimeoutError(f"demorou mais de {segundos} segundos") from None
     finally:
-        executor.shutdown(wait=False)
+        tarefa.cancel()  # só cancela se ainda não começou; não interrompe chamada em execução
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def motivo(erro):
@@ -204,20 +274,21 @@ def motivo(erro):
         return "a chave não está no cofre"
     if tipo == "NameError":
         return "esse plano ainda não foi montado"
-    return f"{tipo}: {texto[:80]}"
+    return f"{tipo}: confira a configuração e tente outro plano"
 
 
 def checar_regras(regras):
-    """Confere se as regras do tutor estão completas."""
+    """Confere a presença da base fixa; não promete obediência do modelo."""
     _sem_lacuna(regras)
-    faltando = [p for p in ("NUNCA", "passos") if p.lower() not in regras.lower()]
-    if faltando:
-        print(f"❌ Faltou nas regras: {faltando}. Sem isso, a IA pode entregar a resposta pronta."); return
-    print(f"✅ Regras prontas ({len(regras.splitlines())} linhas). A IA vai obedecer a elas em toda pergunta.")
-    return
+    if not isinstance(regras, str) or REGRAS_TUTOR not in regras:
+        print("❌ Use ap.REGRAS_TUTOR como base e acrescente suas orientações.")
+        return False
+    print("✅ Base de regras conferida. Teste se as respostas seguem a aula.")
+    return True
+
 
 _CASOS = {
-    "para_numero": [("R$ 1.234,56", 1234.56), ("R$ 950.000,00", 950000.0), ("R$ 12,30", 12.3), (1500.5, 1500.5)],
+    "para_numero": [("R$ 1.234,56", 1234.56), ("R$ 950.000,00", 950000.0), ("R$ 12,30", 12.3), (1500.5, 1500.5), ("-R$ 1.234,56", -1234.56), ("R$ -12,30", -12.3)],
     "data_br": [("05/03/2026", "2026-03-05"), ("28/09/2026", "2026-09-28"), (pd.Timestamp("2026-01-10"), "2026-01-10")],
     "padronizar": [(" ob-01", "OB-01"), ("OB-02 ", "OB-02"), ("ob-03", "OB-03")],
     "conferir_total": [(([10.5, 20.25], 30.75), True), (([10.4, 20.0], 30.0), False), (([0.1, 0.2], 0.3), True)],
@@ -233,6 +304,7 @@ _DICAS = {
 def testar(funcao):
     """Confere a sua peça com casos de teste. Se passar, ela é encaixada no motor."""
     nome = funcao.__name__
+    PECAS.pop(nome, None)  # a versão reprovada não pode deixar aprovação antiga ativa
     codigo = funcao.__code__
     if any("___" in str(x) for x in (*codigo.co_consts, *codigo.co_names)):
         print(LACUNA); return
@@ -255,6 +327,14 @@ def testar(funcao):
         if not certo:
             print(f"❌ {nome}({entrada!r}) devolveu {saida!r}, mas o esperado era {esperado!r}")
             print(f"💡 Dica: {_DICAS[nome]}"); return
+    if nome == "para_numero":
+        for invalido in ("1234.56", "1,234.56", "", None, float("nan")):
+            try:
+                funcao(invalido)
+            except (ValueError, TypeError):
+                continue
+            print(f"❌ {nome} deve rejeitar a entrada inválida {invalido!r}. Use ap.validar_numero_br.")
+            return False
     PECAS[nome] = funcao
     print(f"✅ Peça '{nome}' aprovada e encaixada no motor ({len(PECAS)}/{len(_CASOS)})")
     return
@@ -482,6 +562,7 @@ class Modelo:
             tabela = max((t for t in self.tabelas if t != "Calendario"), key=lambda t: len(self.tabelas[t]))
         if tabela not in self.tabelas:
             raise ValueError(f"A tabela {tabela} não existe.")
+        novas = list(self.lista_medidas)
         for nome, valor in dicionario.items():
             _sem_lacuna(nome, valor)
             dax, formato = valor if isinstance(valor, tuple) else (valor, self._formato_padrao(nome))
@@ -490,10 +571,14 @@ class Modelo:
                     raise ValueError(f"A medida '{nome}' tem o mesmo nome da coluna {t}[{nome}]. "
                                      f"Use outro nome, por exemplo 'Total {nome}'.")
             for t, c in re.findall(r"'?([^\s\[\]'(),]+)'?\[([^\]]+)\]", dax):
-                if t in self.tabelas and c not in self.tabelas[t].columns:
+                if t not in self.tabelas:
+                    raise ValueError(f"Na medida '{nome}': a tabela {t} não existe.")
+                if c not in self.tabelas[t].columns:
                     raise ValueError(f"Na medida '{nome}': a coluna {t}[{c}] não existe.")
-            self.lista_medidas.append((tabela, nome, " ".join(dax.split()), formato))
+            novas = [m for m in novas if m[1] != nome]
+            novas.append((tabela, nome, " ".join(dax.split()), formato))
             print(f"📐 {nome} = {dax}")
+        self.lista_medidas = novas
 
     @staticmethod
     def _formato_padrao(nome):
@@ -813,19 +898,54 @@ class Painel:
             print(f"   Abra no Power BI Desktop: {PASTA_PROJETO / (self.nome + '.pbip')}")
 
     def baixar(self):
-        """Grava o modelo e o painel, junta tudo num .zip e (no Colab) baixa."""
-        self._layout()  # confere os campos antes de gravar qualquer coisa
-        if PASTA_PROJETO.exists():
-            shutil.rmtree(PASTA_PROJETO)
-        self.modelo.salvar(dados_embutidos=True)
-        self.salvar()
-        arquivo = shutil.make_archive(self.nome, "zip", ".", PASTA_PROJETO.name)
+        """Exporta em staging e preserva outros projetos e a saída anterior em caso de erro."""
+        global PASTA_PROJETO
+        if self.modelo is None:
+            raise ValueError("Para baixar, use Painel(modelo). Para Painel(nome), use salvar().")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", self.nome):
+            raise ValueError("Use nome de projeto com letras, números, _ ou -.")
+        self._layout()
+        destino = PASTA_PROJETO.resolve()
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        original = PASTA_PROJETO
+        artefatos = [f"{self.nome}.SemanticModel", f"{self.nome}.Report", f"{self.nome}.pbip", "modelo.json", ".gitignore"]
+        with tempfile.TemporaryDirectory(prefix=".autopilot-", dir=destino.parent) as temporaria:
+            staging = Path(temporaria) / "projeto"
+            try:
+                PASTA_PROJETO = staging
+                self.modelo.salvar(dados_embutidos=True)
+                self.salvar()
+            finally:
+                PASTA_PROJETO = original
+            zip_temporario = shutil.make_archive(str(Path(temporaria) / self.nome), "zip", temporaria, "projeto")
+            backup = Path(temporaria) / "backup"
+            backup.mkdir()
+            destino.mkdir(parents=True, exist_ok=True)
+            instalados, salvos = [], []
+            try:
+                for nome in artefatos:
+                    alvo = destino / nome
+                    if alvo.exists():
+                        alvo.rename(backup / nome)
+                        salvos.append(nome)
+                    (staging / nome).rename(alvo)
+                    instalados.append(nome)
+                arquivo = Path(f"{self.nome}.zip").resolve()
+                os.replace(zip_temporario, arquivo)
+            except Exception:
+                for nome in instalados:
+                    alvo = destino / nome
+                    shutil.rmtree(alvo) if alvo.is_dir() else alvo.unlink(missing_ok=True)
+                for nome in salvos:
+                    (backup / nome).rename(destino / nome)
+                raise
         print(f"📦 {arquivo}: extraia em qualquer pasta e abra projeto\\{self.nome}.pbip > Atualizar")
         try:
             from google.colab import files
-            files.download(arquivo)
+            files.download(str(arquivo))
         except ImportError:
             pass
+        return str(arquivo)
 
     def _layout(self):
         """Organiza sozinho: título e filtros no topo, cartões numa linha, gráficos em grade."""
