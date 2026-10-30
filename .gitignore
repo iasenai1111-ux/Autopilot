@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+projeto/
+_pacote/
+*.zip
+vscode/dados/base_tratada.xlsx
+**/.pbi/localSettings.json
+**/.pbi/cache.abf
